@@ -14,6 +14,8 @@
 #include "shaders/constants.glsl"
 #include "rive/profiler/profiler_macros.h"
 
+#include <cstring>
+
 namespace rive::gpu
 {
 namespace
@@ -748,6 +750,57 @@ void PathDraw::initForMidpointFan(RenderContext* context,
     assert((m_resourceCounts.midpointFanTessVertexCount |
             m_resourceCounts.outerCubicTessVertexCount) == 0);
 
+    // Subdivision depends on the path, stroke geometry and exact linear
+    // transform, not translation. Borrow immutable tables from a matching draw
+    // in this frame; the context clears the lookup before resetting storage.
+    auto pathHash = reinterpret_cast<uintptr_t>(m_pathRef) >> 4;
+    pathHash ^= pathHash >> 8;
+    auto& cacheEntry = context->m_midpointFanCache[
+        pathHash & (context->m_midpointFanCache.size() - 1)];
+    m_preparationMutationID = m_pathRef->getRawPathMutationID();
+    const auto* prepared = cacheEntry;
+    if (prepared != nullptr && prepared->m_pathRef == m_pathRef &&
+        prepared->m_preparationMutationID == m_preparationMutationID &&
+        prepared->m_pathFillRule == m_pathFillRule &&
+        prepared->m_coverageType == m_coverageType &&
+        prepared->m_contourDirections == m_contourDirections &&
+        prepared->m_strokeRadius == m_strokeRadius &&
+        prepared->m_featherRadius == m_featherRadius &&
+        std::memcmp(prepared->m_matrix.values(), m_matrix.values(),
+                    sizeof(float) * 4) == 0 &&
+        (!isStrokeOrFeather() ||
+         (prepared->m_strokeJoin == paint->getJoin() &&
+          prepared->m_strokeCap == paint->getCap())))
+    {
+        // The arrays are immutable after preparation. FixedQueue copies keep
+        // independent read cursors; no draw owns or frees the backing storage.
+        m_contours = prepared->m_contours;
+        m_numChops = prepared->m_numChops;
+        m_chopVertices = prepared->m_chopVertices;
+        m_tangentPairs = prepared->m_tangentPairs;
+        m_polarSegmentCounts = prepared->m_polarSegmentCounts;
+        m_parametricSegmentCounts = prepared->m_parametricSegmentCounts;
+        m_resourceCounts.pathCount = prepared->m_resourceCounts.pathCount;
+        m_resourceCounts.contourCount = prepared->m_resourceCounts.contourCount;
+        m_resourceCounts.maxTessellatedSegmentCount =
+            prepared->m_resourceCounts.maxTessellatedSegmentCount;
+        m_resourceCounts.midpointFanTessVertexCount =
+            prepared->m_resourceCounts.midpointFanTessVertexCount;
+        if (isStrokeOrFeather())
+        {
+            m_strokeJoin = prepared->m_strokeJoin;
+            m_strokeCap = prepared->m_strokeCap;
+            m_strokeMatrixMaxScale = prepared->m_strokeMatrixMaxScale;
+            m_polarSegmentsPerRadian = prepared->m_polarSegmentsPerRadian;
+        }
+        RIVE_DEBUG_CODE(m_pendingLineCount = prepared->m_pendingLineCount;)
+        RIVE_DEBUG_CODE(m_pendingCurveCount = prepared->m_pendingCurveCount;)
+        RIVE_DEBUG_CODE(m_pendingRotationCount = prepared->m_pendingRotationCount;)
+        RIVE_DEBUG_CODE(m_pendingEmptyStrokeCountForCaps =
+                            prepared->m_pendingEmptyStrokeCountForCaps;)
+        return;
+    }
+
     if (isStrokeOrFeather())
     {
         m_strokeMatrixMaxScale = m_matrix.findMaxScale();
@@ -1364,6 +1417,7 @@ void PathDraw::initForMidpointFan(RenderContext* context,
                 ? tessVertexCount * 2
                 : tessVertexCount;
     }
+    cacheEntry = this;
 }
 
 void PathDraw::initForInteriorTriangulation(RenderContext* context,

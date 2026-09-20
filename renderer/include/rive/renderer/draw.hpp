@@ -450,6 +450,7 @@ protected:
     std::array<Vec2D, 2>* m_tangentPairs = nullptr;
     uint32_t* m_polarSegmentCounts = nullptr;
     uint32_t* m_parametricSegmentCounts = nullptr;
+    uint64_t m_preparationMutationID = 0;
 
     // Unique ID used by shaders for the current frame.
     uint32_t m_pathID = 0;

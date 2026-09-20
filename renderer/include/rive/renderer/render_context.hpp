@@ -462,6 +462,10 @@ private:
     TrivialBlockAllocator m_perFrameAllocator{
         kPerFlushAllocatorInitialBlockSize};
 
+    // Bounded, frame-local lookup. Entries borrow preparation from draws in
+    // m_perFrameAllocator; collisions only cause redundant preparation.
+    std::array<const PathDraw*, 256> m_midpointFanCache{};
+
     // Allocators for intermediate path processing buffers.
     constexpr static size_t kIntermediateDataInitialStrokes =
         8192; // * 84 == 688 KiB.

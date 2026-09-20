@@ -1003,6 +1003,7 @@ void RenderContext::flush(const FlushResources& flushResources)
 
     // Drop all memory that was allocated for this frame using
     // TrivialBlockAllocator.
+    m_midpointFanCache.fill(nullptr);
     m_perFrameAllocator.reset();
     m_numChopsAllocator.reset();
     m_chopVerticesAllocator.reset();

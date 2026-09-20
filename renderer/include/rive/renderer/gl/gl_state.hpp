@@ -18,6 +18,17 @@ public:
     GLState(const GLCapabilities& capabilities) : m_capabilities(capabilities)
     {
         invalidate();
+
+#ifndef RIVE_WEBGL
+        if (m_capabilities.KHR_parallel_shader_compile)
+        {
+            // Configure the compiler once per GLState, not on every shared-context
+            // invalidation. Repeating this call can stall the driver for ~200 ms.
+            // Some drivers need an explicit setting to enable parallel compilation;
+            // keep the existing two-thread limit rather than requesting all threads.
+            glMaxShaderCompilerThreadsKHR(2);
+        }
+#endif
     }
 
     const GLCapabilities& capabilities() const { return m_capabilities; }

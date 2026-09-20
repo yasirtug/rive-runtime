@@ -59,26 +59,6 @@ void GLState::invalidate()
         glProvokingVertexANGLE(GL_FIRST_VERTEX_CONVENTION_ANGLE);
     }
 #endif
-
-    // WebGL doesn't support glMaxShaderCompilerThreadsKHR.
-#ifndef RIVE_WEBGL
-    if (m_capabilities.KHR_parallel_shader_compile)
-    {
-        // Allow GL's shader compilation to use 2 background threads.
-        //
-        // Parallel compilation is documented to be enabled by default, but on
-        // some drivers the parallel compilation does not actually activate
-        // without explicitly setting this.
-        //
-        // NOTE: the spec states that apps may use "0xffffffff" to mean "use the
-        // maximum number of threads", but that seems like an easy invitation
-        // for a driver bug, so we are explicit about the number of threads.
-        //
-        // FIXME: When AsyncPipelineManager starts using >1 thread, we should
-        // incorporate its same logic here.
-        glMaxShaderCompilerThreadsKHR(2);
-    }
-#endif
 }
 
 void GLState::setScissor(IAABB scissor, uint32_t renderTargetHeight)
