@@ -203,6 +203,9 @@ RenderContextGLImpl::RenderContextGLImpl(
     }
     m_platformFeatures.clipSpaceBottomUp = true;
     m_platformFeatures.framebufferBottomUp = true;
+    m_platformFeatures.supportsTessellationAliases =
+        !m_capabilities.isGLES &&
+        !m_capabilities.needsFloatingPointTessellationTexture;
 
     GLint maxTextureSize;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);

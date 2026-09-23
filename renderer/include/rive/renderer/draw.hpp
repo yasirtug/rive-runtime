@@ -427,6 +427,28 @@ protected:
     float m_strokeMatrixMaxScale;
     float m_polarSegmentsPerRadian;
 
+    // Local analysis shared by all compatible resolution variants in a frame.
+    // Cusp repair uses the actual scale and cannot be shared across transforms.
+    struct MidpointFanGeometry
+    {
+        double* parametricPow4 = nullptr;
+        float* rotationAngles = nullptr;
+        size_t contourCount = 0;
+        size_t lineCount = 0;
+        size_t curveCount = 0;
+        size_t rotationCount = 0;
+        size_t paddedCurveCount = 0;
+        size_t paddedRotationCount = 0;
+        bool hasCusps = false;
+    };
+
+    void collectMidpointFanGeometry(RenderContext*);
+    void resolveMidpointFanDensity();
+
+    MidpointFanGeometry* m_midpointFanGeometry = nullptr;
+    // Zero selects exact-transform preparation (e.g., feathered paths).
+    float m_preparationScale = 0;
+
     struct ContourInfo
     {
         RawPath::Iter endOfContour;
@@ -442,6 +464,11 @@ protected:
         uint32_t strokeCapSegmentCount;
         uint32_t paddingVertexCount;
         RIVE_DEBUG_CODE(uint32_t tessVertexCount;)
+        // Only the first contour owns this frame-local reuse state.
+        const RenderContext::LogicalFlush *tessellationFlush = nullptr;
+        uint32_t tessellationLocation = 0;
+        uint32_t tessellationFlags = 0;
+        bool preparationShared = false;
     };
 
     ContourInfo* m_contours;

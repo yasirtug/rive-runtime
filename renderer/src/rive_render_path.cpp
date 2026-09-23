@@ -112,7 +112,9 @@ void RiveRenderPath::addRenderPathBackwards(const RenderPath* path,
 
 void RiveRenderPath::addRawPath(const RawPath& path)
 {
+    assert(m_rawPathMutationLockCount == 0);
     m_rawPath.addPath(path, nullptr);
+    m_dirt = kAllDirt;
 }
 
 const AABB& RiveRenderPath::getBounds() const

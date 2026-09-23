@@ -14,7 +14,9 @@
 #include "shaders/constants.glsl"
 #include "rive/profiler/profiler_macros.h"
 
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace rive::gpu
 {
@@ -39,6 +41,68 @@ static uint32_t find_outer_cubic_subdivision_count(
               (1.f / kPatchSegmentCountExcludingJoin));
     return static_cast<uint32_t>(
         math::clamp(numSubdivisions, 1, kMaxCurveSubdivisions));
+}
+
+// Round a conservative maximum stretch UP to one of four levels per octave.
+// This affects subdivision only, never the instance transform or stroke width.
+// Zero means the matrix cannot use this finite-resolution representation.
+static float midpoint_fan_preparation_scale(const Mat2D& matrix)
+{
+    float scale;
+    if (matrix.xy() == 0 && matrix.yx() == 0)
+    {
+        scale = std::max(std::abs(matrix.xx()), std::abs(matrix.yy()));
+    }
+    else
+    {
+        const double a = matrix.xx(), b = matrix.xy();
+        const double c = matrix.yx(), d = matrix.yy();
+        const double xx = a * a + b * b;
+        const double yy = c * c + d * d;
+        const double xy = a * c + b * d;
+        const double delta = xx - yy;
+        const double eigenvalue =
+            .5 * (xx + yy + std::sqrt(delta * delta + 4 * xy * xy));
+        const double bound =
+            std::sqrt(eigenvalue) *
+            (1 + 8 * std::numeric_limits<double>::epsilon());
+        if (!std::isfinite(bound) ||
+            bound > std::numeric_limits<float>::max())
+        {
+            return 0;
+        }
+        scale = static_cast<float>(bound);
+        if (static_cast<double>(scale) < bound)
+        {
+            scale = std::nextafter(scale,
+                                   std::numeric_limits<float>::infinity());
+        }
+    }
+    if (!std::isnormal(scale))
+    {
+        return 0;
+    }
+    constexpr uint32_t discardedBits = (1u << 21) - 1;
+    uint32_t bits = math::bit_cast<uint32_t>(scale);
+    bits = (bits + discardedBits) & ~discardedBits;
+    scale = math::bit_cast<float>(bits);
+    return std::isfinite(scale) ? scale : 0;
+}
+
+// Keep the scale-independent Wang bound in double precision so very small
+// local curves can still be magnified without underflowing the cached measure.
+static double local_cubic_pow4(const Vec2D p[])
+{
+    const double x0 = double(p[0].x) - 2 * double(p[1].x) + p[2].x;
+    const double y0 = double(p[0].y) - 2 * double(p[1].y) + p[2].y;
+    const double x1 = double(p[1].x) - 2 * double(p[2].x) + p[3].x;
+    const double y1 = double(p[1].y) - 2 * double(p[2].y) + p[3].y;
+    // Allow for rounding when the density pass converts back to float and
+    // takes two square roots before rounding the segment count upward.
+    constexpr double precision =
+        wangs_formula::length_term_pow2<3>(kParametricPrecision) *
+        (1 + 8 * double(std::numeric_limits<float>::epsilon()));
+    return std::max(x0 * x0 + y0 * y0, x1 * x1 + y1 * y1) * precision;
 }
 
 constexpr static int NUM_SEGMENTS_IN_MITER_OR_BEVEL_JOIN = 5;
@@ -750,31 +814,60 @@ void PathDraw::initForMidpointFan(RenderContext* context,
     assert((m_resourceCounts.midpointFanTessVertexCount |
             m_resourceCounts.outerCubicTessVertexCount) == 0);
 
-    // Subdivision depends on the path, stroke geometry and exact linear
-    // transform, not translation. Borrow immutable tables from a matching draw
-    // in this frame; the context clears the lookup before resetting storage.
+    // Keep several resolutions/styles instead of evicting a path whenever its
+    // scale changes. Translation and rotation do not affect local analysis.
+    m_preparationScale = m_featherRadius == 0
+                             ? midpoint_fan_preparation_scale(m_matrix)
+                             : 0;
     auto pathHash = reinterpret_cast<uintptr_t>(m_pathRef) >> 4;
     pathHash ^= pathHash >> 8;
-    auto& cacheEntry = context->m_midpointFanCache[
+    auto& cacheSet = context->m_midpointFanCache[
         pathHash & (context->m_midpointFanCache.size() - 1)];
     m_preparationMutationID = m_pathRef->getRawPathMutationID();
-    const auto* prepared = cacheEntry;
-    if (prepared != nullptr && prepared->m_pathRef == m_pathRef &&
-        prepared->m_preparationMutationID == m_preparationMutationID &&
-        prepared->m_pathFillRule == m_pathFillRule &&
-        prepared->m_coverageType == m_coverageType &&
-        prepared->m_contourDirections == m_contourDirections &&
-        prepared->m_strokeRadius == m_strokeRadius &&
-        prepared->m_featherRadius == m_featherRadius &&
-        std::memcmp(prepared->m_matrix.values(), m_matrix.values(),
-                    sizeof(float) * 4) == 0 &&
-        (!isStrokeOrFeather() ||
-         (prepared->m_strokeJoin == paint->getJoin() &&
-          prepared->m_strokeCap == paint->getCap())))
+    const PathDraw* prepared = nullptr;
+    const PathDraw* geometrySource = nullptr;
+    for (const PathDraw* candidate : cacheSet.draws)
+    {
+        if (candidate == nullptr)
+        {
+            break;
+        }
+        if (candidate->m_pathRef != m_pathRef ||
+            candidate->m_preparationMutationID != m_preparationMutationID ||
+            candidate->m_pathFillRule != m_pathFillRule ||
+            candidate->m_coverageType != m_coverageType ||
+            candidate->m_contourDirections != m_contourDirections ||
+            candidate->m_strokeRadius != m_strokeRadius ||
+            candidate->m_featherRadius != m_featherRadius ||
+            (isStrokeOrFeather() &&
+             (candidate->m_strokeJoin != paint->getJoin() ||
+              candidate->m_strokeCap != paint->getCap())))
+        {
+            continue;
+        }
+        const bool reusableGeometry =
+            m_preparationScale != 0 && candidate->m_preparationScale != 0 &&
+            !candidate->m_midpointFanGeometry->hasCusps;
+        if (candidate->m_preparationScale == m_preparationScale &&
+            (reusableGeometry ||
+             std::memcmp(candidate->m_matrix.values(), m_matrix.values(),
+                         sizeof(float) * 4) == 0))
+        {
+            prepared = candidate;
+            break;
+        }
+        if (reusableGeometry)
+        {
+            geometrySource = candidate;
+        }
+    }
+    if (prepared != nullptr)
     {
         // The arrays are immutable after preparation. FixedQueue copies keep
         // independent read cursors; no draw owns or frees the backing storage.
         m_contours = prepared->m_contours;
+        m_contours[0].preparationShared = true;
+        m_midpointFanGeometry = prepared->m_midpointFanGeometry;
         m_numChops = prepared->m_numChops;
         m_chopVertices = prepared->m_chopVertices;
         m_tangentPairs = prepared->m_tangentPairs;
@@ -804,11 +897,14 @@ void PathDraw::initForMidpointFan(RenderContext* context,
     if (isStrokeOrFeather())
     {
         m_strokeMatrixMaxScale = m_matrix.findMaxScale();
+        const float densityScale = m_preparationScale != 0
+                                       ? m_preparationScale
+                                       : m_strokeMatrixMaxScale;
 
         float r_ = 0;
         if (m_featherRadius != 0)
         {
-            r_ = m_featherRadius * m_strokeMatrixMaxScale;
+            r_ = m_featherRadius * densityScale;
 
             // Inverse of 1/calc_polar_segments_per_radian at
             // FEATHER_MIN_POLAR_SEGMENT_ANGLE.
@@ -831,7 +927,7 @@ void PathDraw::initForMidpointFan(RenderContext* context,
         }
         if (isStroke())
         {
-            r_ += m_strokeRadius * m_strokeMatrixMaxScale;
+            r_ += m_strokeRadius * densityScale;
         }
         m_polarSegmentsPerRadian =
             math::calc_polar_segments_per_radian<kPolarPrecision>(r_);
@@ -840,6 +936,48 @@ void PathDraw::initForMidpointFan(RenderContext* context,
         m_strokeCap = paint->getCap();
     }
 
+    if (geometrySource != nullptr)
+    {
+        m_midpointFanGeometry = geometrySource->m_midpointFanGeometry;
+        const auto& geometry = *m_midpointFanGeometry;
+        m_numChops = geometrySource->m_numChops;
+        m_chopVertices = geometrySource->m_chopVertices;
+        m_tangentPairs = geometrySource->m_tangentPairs;
+        m_contours = reinterpret_cast<ContourInfo*>(
+            context->perFrameAllocator().alloc(sizeof(ContourInfo) *
+                                               geometry.contourCount));
+        std::memcpy(m_contours, geometrySource->m_contours,
+                    sizeof(ContourInfo) * geometry.contourCount);
+        for (size_t i = 0; i < geometry.contourCount; ++i)
+        {
+            auto& contour = m_contours[i];
+            contour.strokeCapSegmentCount = 0;
+            contour.paddingVertexCount = 0;
+            contour.tessellationFlush = nullptr;
+            contour.tessellationLocation = 0;
+            contour.tessellationFlags = 0;
+            contour.preparationShared = false;
+        }
+        m_parametricSegmentCounts = context->parametricSegmentCountsAllocator()
+                                        .alloc(geometry.paddedCurveCount);
+        if (isStroke())
+        {
+            m_polarSegmentCounts = context->polarSegmentCountsAllocator()
+                                       .alloc(geometry.paddedRotationCount);
+        }
+    }
+    else
+    {
+        m_midpointFanGeometry = context->make<MidpointFanGeometry>();
+        collectMidpointFanGeometry(context);
+    }
+    resolveMidpointFanDensity();
+    cacheSet.draws[cacheSet.next] = this;
+    cacheSet.next = (cacheSet.next + 1) % cacheSet.draws.size();
+}
+
+void PathDraw::collectMidpointFanGeometry(RenderContext* context)
+{
     // Count up how much temporary storage this function will need to reserve in
     // CPU buffers.
     const RawPath& rawPath = m_pathRef->getRawPath();
@@ -902,6 +1040,17 @@ void PathDraw::initForMidpointFan(RenderContext* context,
     }
     m_parametricSegmentCounts =
         context->parametricSegmentCountsAllocator().alloc(maxPaddedCurves);
+    if (m_preparationScale != 0)
+    {
+        m_midpointFanGeometry->parametricPow4 =
+            context->perFrameAllocator().makePODArray<double>(maxPaddedCurves);
+        if (isStroke())
+        {
+            m_midpointFanGeometry->rotationAngles =
+                context->perFrameAllocator().makePODArray<float>(
+                    maxPaddedRotations);
+        }
+    }
 
     float parametricPrecision = gpu::kParametricPrecision;
     if (m_featherRadius > 1)
@@ -919,7 +1068,6 @@ void PathDraw::initForMidpointFan(RenderContext* context,
     size_t lineCount = 0;
     size_t unpaddedCurveCount = 0;
     size_t unpaddedRotationCount = 0;
-    size_t emptyStrokeCountForCaps = 0;
 
     // Iteration pass 1: Collect information on contour and curves counts for
     // every path in the batch, and begin counting tessellated vertices.
@@ -1002,6 +1150,21 @@ void PathDraw::initForMidpointFan(RenderContext* context,
         unpaddedRotationCount += rotationIdx - contourFirstRotationIdx;
         contourFirstRotationIdx = rotationIdx =
             math::round_up_to_multiple_of<4>(rotationIdx);
+        // SIMD resolves complete groups of four. Initialize padding rather
+        // than reading unrelated allocator contents in those lanes.
+        for (size_t j = m_contours[contourIdx - 1].endCurveIdx; j < curveIdx; ++j)
+        {
+            m_parametricSegmentCounts[j] = 0;
+            if (m_midpointFanGeometry->parametricPow4 != nullptr)
+            {
+                m_midpointFanGeometry->parametricPow4[j] = 0;
+            }
+        }
+        for (size_t j = m_contours[contourIdx - 1].endRotationIdx;
+             j < rotationIdx; ++j)
+        {
+            m_tangentPairs[j] = {Vec2D{0, 1}, Vec2D{0, 1}};
+        }
     };
     const int styleFlags = style_flags(isStrokeOrFeather(), roundJoinStroked);
     for (RawPath::Iter iter = startOfContour; iter != end; ++iter)
@@ -1094,6 +1257,7 @@ void PathDraw::initForMidpointFan(RenderContext* context,
                         ? math::find_cubic_convex_180_chops(p, t, &areCusps)
                         : 0; // Feathers already got chopped.
                 uint8_t chopKey = chop_key(areCusps, numChops);
+                m_midpointFanGeometry->hasCusps |= areCusps;
                 m_numChops.push_back(chopKey);
                 Vec2D localChopBuffer[16];
                 switch (chopKey)
@@ -1132,14 +1296,19 @@ void PathDraw::initForMidpointFan(RenderContext* context,
                 for (const Vec2D* end = p + numChops * 3 + 3; p != end;
                      p += 3, ++curveIdx, ++rotationIdx)
                 {
-                    float n4 = wangs_formula::cubic_pow4(p,
-                                                         parametricPrecision,
-                                                         vectorXform);
-                    // Record n^4 for now. This will get resolved later.
                     assert(curveIdx < maxPaddedCurves);
-                    RIVE_INLINE_MEMCPY(m_parametricSegmentCounts + curveIdx,
-                                       &n4,
-                                       sizeof(uint32_t));
+                    if (m_preparationScale != 0)
+                    {
+                        m_midpointFanGeometry->parametricPow4[curveIdx] =
+                            local_cubic_pow4(p);
+                    }
+                    else
+                    {
+                        const float n4 = wangs_formula::cubic_pow4(
+                            p, parametricPrecision, vectorXform);
+                        RIVE_INLINE_MEMCPY(m_parametricSegmentCounts + curveIdx,
+                                           &n4, sizeof(uint32_t));
+                    }
                     assert(rotationIdx < maxPaddedRotations);
                     if (isStroke())
                     {
@@ -1165,14 +1334,20 @@ void PathDraw::initForMidpointFan(RenderContext* context,
                 const Vec2D* p = iter.cubicPts();
                 ++preChopVerbCount;
                 endpointsSum += p[3];
-                float n4 = wangs_formula::cubic_pow4(p,
-                                                     parametricPrecision,
-                                                     vectorXform);
-                // Record n^4 for now. This will get resolved later.
                 assert(curveIdx < maxPaddedCurves);
-                RIVE_INLINE_MEMCPY(m_parametricSegmentCounts + curveIdx++,
-                                   &n4,
-                                   sizeof(uint32_t));
+                if (m_preparationScale != 0)
+                {
+                    m_midpointFanGeometry->parametricPow4[curveIdx] =
+                        local_cubic_pow4(p);
+                }
+                else
+                {
+                    const float n4 = wangs_formula::cubic_pow4(
+                        p, parametricPrecision, vectorXform);
+                    RIVE_INLINE_MEMCPY(m_parametricSegmentCounts + curveIdx,
+                                       &n4, sizeof(uint32_t));
+                }
+                ++curveIdx;
                 break;
             }
         }
@@ -1205,6 +1380,53 @@ void PathDraw::initForMidpointFan(RenderContext* context,
     }
     context->parametricSegmentCountsAllocator().rewindLastAllocation(
         maxPaddedCurves - curveIdx);
+
+    auto& geometry = *m_midpointFanGeometry;
+    geometry.contourCount = contourCount;
+    geometry.lineCount = lineCount;
+    geometry.curveCount = unpaddedCurveCount;
+    geometry.rotationCount = unpaddedRotationCount;
+    geometry.paddedCurveCount = curveIdx;
+    geometry.paddedRotationCount = rotationIdx;
+    if (geometry.rotationAngles != nullptr)
+    {
+        for (size_t j = 0; j < rotationIdx; j += 4)
+        {
+            float4 tx0, ty0, tx1, ty1;
+            std::tie(tx0, ty0, tx1, ty1) =
+                simd::load4x4f(&m_tangentPairs[j][0].x);
+            const float4 numer = tx0 * tx1 + ty0 * ty1;
+            const float4 denomPow2 =
+                (tx0 * tx0 + ty0 * ty0) * (tx1 * tx1 + ty1 * ty1);
+            const float4 cosTheta = simd::clamp(
+                numer / simd::sqrt(denomPow2), float4(-1), float4(1));
+            simd::store(geometry.rotationAngles + j, simd::fast_acos(cosTheta));
+        }
+    }
+}
+
+void PathDraw::resolveMidpointFanDensity()
+{
+    const auto& geometry = *m_midpointFanGeometry;
+    const size_t contourCount = geometry.contourCount;
+    const size_t lineCount = geometry.lineCount;
+    const size_t unpaddedCurveCount = geometry.curveCount;
+    const size_t unpaddedRotationCount = geometry.rotationCount;
+    const size_t curveIdx = geometry.paddedCurveCount;
+    const size_t rotationIdx = geometry.paddedRotationCount;
+    size_t emptyStrokeCountForCaps = 0;
+    if (geometry.parametricPow4 != nullptr)
+    {
+        const double scaleSquared =
+            double(m_preparationScale) * m_preparationScale;
+        for (size_t j = 0; j < curveIdx; ++j)
+        {
+            const float n4 =
+                static_cast<float>(geometry.parametricPow4[j] * scaleSquared);
+            RIVE_INLINE_MEMCPY(m_parametricSegmentCounts + j, &n4,
+                               sizeof(uint32_t));
+        }
+    }
 
     // Iteration pass 2: Finish calculating the numbers of tessellation segments
     // in each contour, using SIMD.
@@ -1247,19 +1469,24 @@ void PathDraw::initForMidpointFan(RenderContext* context,
             for (j = contour->firstRotationIdx; j < contour->endRotationIdx;
                  j += 4)
             {
-                // Measure the rotations of curves in batches of 4.
                 assert(j + 4 <= rotationIdx);
-
-                float4 tx0, ty0, tx1, ty1;
-                std::tie(tx0, ty0, tx1, ty1) =
-                    simd::load4x4f(&m_tangentPairs[j][0].x);
-
-                float4 numer = tx0 * tx1 + ty0 * ty1;
-                float4 denom_pow2 =
-                    (tx0 * tx0 + ty0 * ty0) * (tx1 * tx1 + ty1 * ty1);
-                float4 cosTheta = numer / simd::sqrt(denom_pow2);
-                cosTheta = simd::clamp(cosTheta, float4(-1), float4(1));
-                float4 theta = simd::fast_acos(cosTheta);
+                float4 theta;
+                if (geometry.rotationAngles != nullptr)
+                {
+                    theta = simd::load4f(geometry.rotationAngles + j);
+                }
+                else
+                {
+                    float4 tx0, ty0, tx1, ty1;
+                    std::tie(tx0, ty0, tx1, ty1) =
+                        simd::load4x4f(&m_tangentPairs[j][0].x);
+                    const float4 numer = tx0 * tx1 + ty0 * ty1;
+                    const float4 denomPow2 =
+                        (tx0 * tx0 + ty0 * ty0) * (tx1 * tx1 + ty1 * ty1);
+                    const float4 cosTheta = simd::clamp(
+                        numer / simd::sqrt(denomPow2), float4(-1), float4(1));
+                    theta = simd::fast_acos(cosTheta);
+                }
                 // Find polar segment counts from the rotation angles.
                 float4 n = simd::ceil(theta * m_polarSegmentsPerRadian);
                 n = simd::clamp(n, float4(1), float4(kMaxPolarSegments));
@@ -1417,7 +1644,6 @@ void PathDraw::initForMidpointFan(RenderContext* context,
                 ? tessVertexCount * 2
                 : tessVertexCount;
     }
-    cacheEntry = this;
 }
 
 void PathDraw::initForInteriorTriangulation(RenderContext* context,
@@ -1648,7 +1874,35 @@ gpu::DrawBatch* PathDraw::pushToRenderContext(
                 // Tessellation (midpoint fan or outer cubic).
                 uint32_t tessLocation =
                     allocateTessellationVertices(flush, tessVertexCount);
-                pushTessellationData(flush, tessVertexCount, tessLocation);
+                uint32_t sourceLocation = 0;
+                if (m_triangulator == nullptr && m_featherRadius == 0 &&
+                    m_contours[0].preparationShared &&
+                    flush->supportsTessellationAliases())
+                {
+                    auto &shared = m_contours[0];
+                    if (shared.tessellationFlush == flush &&
+                        shared.tessellationFlags == m_contourFlags)
+                    {
+                        sourceLocation = shared.tessellationLocation;
+                    }
+                    else
+                    {
+                        shared.tessellationFlush = flush;
+                        shared.tessellationFlags = m_contourFlags;
+                        shared.tessellationLocation = tessLocation;
+                    }
+                }
+                if (sourceLocation != 0)
+                {
+                    flush->pushTessellationAlias(
+                        m_pathID, sourceLocation, tessLocation, tessVertexCount,
+                        math::lossless_numeric_cast<uint32_t>(
+                            m_resourceCounts.contourCount));
+                }
+                else
+                {
+                    pushTessellationData(flush, tessVertexCount, tessLocation);
+                }
                 return &pushTessellationDraw(flush,
                                              tessVertexCount,
                                              tessLocation);

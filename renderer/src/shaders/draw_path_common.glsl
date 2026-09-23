@@ -297,6 +297,15 @@ INLINE bool unpack_tessellated_path_vertex(float4 patchVertexData,
     TESSDATA4 tessVertexData =
         TEXEL_FETCH(@tessVertexTexture, tess_texel_coord(tessVertexIdx));
     uint contourIDWithFlags = TESSDATA_AS_UINT(tessVertexData.w);
+    uint aliasedPathID = 0u;
+    if (contourIDWithFlags == TESSELLATION_ALIAS_CONTOUR_FLAG)
+    {
+        aliasedPathID = TESSDATA_AS_UINT(tessVertexData.y);
+        tessVertexIdx = int(TESSDATA_AS_UINT(tessVertexData.x));
+        tessVertexData =
+            TEXEL_FETCH(@tessVertexTexture, tess_texel_coord(tessVertexIdx));
+        contourIDWithFlags = TESSDATA_AS_UINT(tessVertexData.w);
+    }
 
     // Fetch and unpack the contour referenced by the tessellation vertex.
     // NOTE: The contourID is guaranteed to be >= 1 at this point, but clamp it
@@ -305,7 +314,7 @@ INLINE bool unpack_tessellated_path_vertex(float4 patchVertexData,
     uint contourID = max(contourIDWithFlags & CONTOUR_ID_MASK, 1u);
     uint4 contourData = STORAGE_BUFFER_LOAD4(@contourBuffer, contourID - 1u);
     float2 midpoint = uintBitsToFloat(contourData.xy);
-    outPathID = contourData.z & 0xffffu;
+    outPathID = aliasedPathID != 0u ? aliasedPathID : contourData.z & 0xffffu;
     uint vertexIndex0 = contourData.w;
 
     // Fetch and unpack the path.

@@ -128,6 +128,8 @@ struct PlatformFeatures
     // Supported InterlockModes.
     // FIXME: MSAA is implicit even though it isn't implemented on all backends.
     bool supportsRasterOrderingMode = false;
+    // Backend supports local-space tessellation aliases in path shaders.
+    bool supportsTessellationAliases = false;
     bool supportsAtomicMode = false;
     bool supportsClockwiseMode = false;
     // InterlockMode::Clockwise with fixedFunctionColorOutput and srcOver blend.

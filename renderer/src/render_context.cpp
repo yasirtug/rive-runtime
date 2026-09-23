@@ -1003,7 +1003,7 @@ void RenderContext::flush(const FlushResources& flushResources)
 
     // Drop all memory that was allocated for this frame using
     // TrivialBlockAllocator.
-    m_midpointFanCache.fill(nullptr);
+    m_midpointFanCache.fill({});
     m_perFrameAllocator.reset();
     m_numChopsAllocator.reset();
     m_chopVerticesAllocator.reset();
@@ -2993,6 +2993,38 @@ uint32_t RenderContext::LogicalFlush::pushPath(const PathDraw* draw)
            m_ctx->m_paintAuxData.elementsWritten());
 
     return m_currentPathID;
+}
+
+void RenderContext::LogicalFlush::pushTessellationAlias(uint32_t pathID,
+                                                        uint32_t sourceLocation,
+                                                        uint32_t location,
+                                                        uint32_t vertexCount,
+                                                        uint32_t contourCount)
+{
+    // Retain virtual vertex locations, so normal adjacent draws still coalesce.
+    // Each alias texel redirects to immutable geometry in this logical flush.
+    while (vertexCount != 0)
+    {
+        uint32_t x = location % kTessTextureWidth;
+        uint32_t count = std::min<uint32_t>(vertexCount, kTessTextureWidth - x);
+        Vec2D args[4] = {{static_cast<float>(sourceLocation) - x,
+                          static_cast<float>(pathID)},
+                         {},
+                         {},
+                         {}};
+        m_ctx->m_tessSpanData.set_back(
+            args, Vec2D{}, static_cast<float>(location / kTessTextureWidth), x,
+            x + count, 0, 0, 1, TESSELLATION_ALIAS_CONTOUR_FLAG);
+        sourceLocation += count;
+        location += count;
+        vertexCount -= count;
+    }
+    // These reserved records are unused: the alias reads its source contours.
+    for (uint32_t i = 0; i < contourCount; ++i)
+    {
+        m_ctx->m_contourData.skip_back();
+    }
+    m_currentContourID += contourCount;
 }
 
 RenderContext::TessellationWriter::TessellationWriter(

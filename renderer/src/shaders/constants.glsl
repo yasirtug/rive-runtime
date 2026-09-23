@@ -97,6 +97,7 @@
 #define JOIN_TANGENT_INNER_CONTOUR_FLAG (1u << 21u)
 #define LEFT_JOIN_CONTOUR_FLAG (1u << 20u)
 #define RIGHT_JOIN_CONTOUR_FLAG (1u << 19u)
+#define TESSELLATION_ALIAS_CONTOUR_FLAG (1u << 18u)
 #define CONTOUR_ID_MASK 0xffffu
 
 // This is guaranteed to not collide with any path IDs being rendered.

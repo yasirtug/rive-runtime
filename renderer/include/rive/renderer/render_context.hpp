@@ -462,9 +462,14 @@ private:
     TrivialBlockAllocator m_perFrameAllocator{
         kPerFlushAllocatorInitialBlockSize};
 
-    // Bounded, frame-local lookup. Entries borrow preparation from draws in
-    // m_perFrameAllocator; collisions only cause redundant preparation.
-    std::array<const PathDraw*, 256> m_midpointFanCache{};
+    // Frame-local, set-associative lookup. Multiple resolutions and styles of
+    // a path coexist; eviction never releases data still used by queued draws.
+    struct MidpointFanCacheSet
+    {
+        std::array<const PathDraw*, 16> draws{};
+        size_t next = 0;
+    };
+    std::array<MidpointFanCacheSet, 128> m_midpointFanCache{};
 
     // Allocators for intermediate path processing buffers.
     constexpr static size_t kIntermediateDataInitialStrokes =
@@ -513,6 +518,11 @@ private:
         gpu::InterlockMode interlockMode() const
         {
             return m_ctx->frameInterlockMode();
+        }
+        bool supportsTessellationAliases() const
+        {
+            return m_ctx->platformFeatures().supportsTessellationAliases &&
+                   interlockMode() == gpu::InterlockMode::rasterOrdering;
         }
 
         // Access this flush's gpu::FlushDescriptor (which is not valid until
@@ -713,6 +723,10 @@ private:
         // define that draw specifically with a separate call to
         // pushMidpointFanDraw() or pushOuterCubicsDraw().
         [[nodiscard]] uint32_t pushPath(const PathDraw* draw);
+
+        void pushTessellationAlias(uint32_t pathID, uint32_t sourceLocation,
+                                   uint32_t location, uint32_t vertexCount,
+                                   uint32_t contourCount);
 
         // Pushes a contour record to the GPU that references the given path.
         //
