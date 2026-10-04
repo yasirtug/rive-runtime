@@ -63,6 +63,32 @@ public:
     void deleteBuffer(GLuint);
 
 private:
+    // One face's stencil test and ops, exactly as passed to GL.
+    struct StencilFaceGL
+    {
+        GLenum func;
+        GLint reference;
+        GLuint compareMask;
+        GLenum failOp;
+        GLenum depthFailOp;
+        GLenum passOp;
+
+        bool sameTest(const StencilFaceGL& other) const
+        {
+            return func == other.func && reference == other.reference &&
+                   compareMask == other.compareMask;
+        }
+        bool sameOps(const StencilFaceGL& other) const
+        {
+            return failOp == other.failOp &&
+                   depthFailOp == other.depthFailOp && passOp == other.passOp;
+        }
+    };
+    // Issues only the stencil calls that change GL's state. Path draws switch
+    // stencil settings on nearly every draw, and many consecutive draws repeat
+    // them, so redundant calls are a large share of the WebGL command stream.
+    void setStencilFaces(const StencilFaceGL& front, const StencilFaceGL& back);
+
     const GLCapabilities m_capabilities;
     std::array<uint32_t, 4> m_scissorBox;
     bool m_scissorEnabled;
@@ -77,6 +103,8 @@ private:
     GLuint m_boundVAO;
     GLuint m_boundArrayBufferID;
     GLuint m_boundUniformBufferID;
+    StencilFaceGL m_stencilFront;
+    StencilFaceGL m_stencilBack;
 
     struct
     {
@@ -86,6 +114,7 @@ private:
         bool writeMasks : 1;
         bool blendEquation : 1;
         bool cullFace : 1;
+        bool stencilFaces : 1;
         bool boundProgramID : 1;
         bool boundVAO : 1;
         bool boundArrayBufferID : 1;

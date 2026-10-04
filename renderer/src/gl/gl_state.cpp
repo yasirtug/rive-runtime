@@ -325,6 +325,64 @@ void GLState::setWriteMasks(bool colorWriteMask,
     }
 }
 
+void GLState::setStencilFaces(const StencilFaceGL& front,
+                              const StencilFaceGL& back)
+{
+    const bool valid = m_validState.stencilFaces;
+    const bool frontTest = !valid || !front.sameTest(m_stencilFront);
+    const bool frontOps = !valid || !front.sameOps(m_stencilFront);
+    const bool backTest = !valid || !back.sameTest(m_stencilBack);
+    const bool backOps = !valid || !back.sameOps(m_stencilBack);
+
+    // When both faces change to the same values, one call sets both.
+    if (frontTest && backTest && front.sameTest(back))
+    {
+        glStencilFunc(front.func, front.reference, front.compareMask);
+    }
+    else
+    {
+        if (frontTest)
+        {
+            glStencilFuncSeparate(GL_FRONT,
+                                  front.func,
+                                  front.reference,
+                                  front.compareMask);
+        }
+        if (backTest)
+        {
+            glStencilFuncSeparate(GL_BACK,
+                                  back.func,
+                                  back.reference,
+                                  back.compareMask);
+        }
+    }
+    if (frontOps && backOps && front.sameOps(back))
+    {
+        glStencilOp(front.failOp, front.depthFailOp, front.passOp);
+    }
+    else
+    {
+        if (frontOps)
+        {
+            glStencilOpSeparate(GL_FRONT,
+                                front.failOp,
+                                front.depthFailOp,
+                                front.passOp);
+        }
+        if (backOps)
+        {
+            glStencilOpSeparate(GL_BACK,
+                                back.failOp,
+                                back.depthFailOp,
+                                back.passOp);
+        }
+    }
+
+    m_stencilFront = front;
+    m_stencilBack = back;
+    m_validState.stencilFaces = true;
+}
+
 void GLState::setPipelineState(const gpu::PipelineState& pipelineState)
 {
     disableScissor(); // Scissor isn't currently used in the pipeline state.
@@ -332,40 +390,21 @@ void GLState::setPipelineState(const gpu::PipelineState& pipelineState)
                            pipelineState.stencilTestEnabled);
     if (pipelineState.stencilTestEnabled)
     {
-        if (!pipelineState.stencilDoubleSided)
-        {
-            glStencilFunc(
-                gl_stencil_func(pipelineState.stencilFrontOps.compareOp),
-                pipelineState.stencilReference,
-                pipelineState.stencilCompareMask);
-            glStencilOp(
-                gl_stencil_op(pipelineState.stencilFrontOps.failOp),
-                gl_stencil_op(pipelineState.stencilFrontOps.depthFailOp),
-                gl_stencil_op(pipelineState.stencilFrontOps.passOp));
-        }
-        else
-        {
-            glStencilFuncSeparate(
-                GL_FRONT,
-                gl_stencil_func(pipelineState.stencilFrontOps.compareOp),
-                pipelineState.stencilReference,
-                pipelineState.stencilCompareMask);
-            glStencilOpSeparate(
-                GL_FRONT,
-                gl_stencil_op(pipelineState.stencilFrontOps.failOp),
-                gl_stencil_op(pipelineState.stencilFrontOps.depthFailOp),
-                gl_stencil_op(pipelineState.stencilFrontOps.passOp));
-            glStencilFuncSeparate(
-                GL_BACK,
-                gl_stencil_func(pipelineState.stencilBackOps.compareOp),
-                pipelineState.stencilReference,
-                pipelineState.stencilCompareMask);
-            glStencilOpSeparate(
-                GL_BACK,
-                gl_stencil_op(pipelineState.stencilBackOps.failOp),
-                gl_stencil_op(pipelineState.stencilBackOps.depthFailOp),
-                gl_stencil_op(pipelineState.stencilBackOps.passOp));
-        }
+        auto face = [&pipelineState](const gpu::StencilFaceOps& ops) {
+            return StencilFaceGL{
+                gl_stencil_func(ops.compareOp),
+                static_cast<GLint>(pipelineState.stencilReference),
+                static_cast<GLuint>(pipelineState.stencilCompareMask),
+                gl_stencil_op(ops.failOp),
+                gl_stencil_op(ops.depthFailOp),
+                gl_stencil_op(ops.passOp),
+            };
+        };
+        const StencilFaceGL front = face(pipelineState.stencilFrontOps);
+        setStencilFaces(front,
+                        pipelineState.stencilDoubleSided
+                            ? face(pipelineState.stencilBackOps)
+                            : front);
     }
     setCullFace(gl_cull_face(pipelineState.cullFace));
     setBlendEquation(pipelineState.blendEquation);

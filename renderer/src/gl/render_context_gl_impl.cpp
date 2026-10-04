@@ -1415,6 +1415,8 @@ void RenderContextGLImpl::AtlasProgram::compile(
         m_baseInstanceUniformLocation =
             glGetUniformLocation(m_program,
                                  glutils::BASE_INSTANCE_UNIFORM_NAME);
+        // A freshly linked program holds its own uniform values.
+        m_baseInstanceCache = kUnknownBaseInstance;
     }
 }
 
@@ -2487,6 +2489,7 @@ void RenderContextGLImpl::flush(const FlushDescriptor& desc)
                     fillBatch.patchCount,
                     fillBatch.basePatch,
                     m_atlasFillProgram.baseInstanceUniformLocation(),
+                    m_atlasFillProgram.baseInstanceCache(),
                     &flushInjector);
             }
         }
@@ -2511,6 +2514,7 @@ void RenderContextGLImpl::flush(const FlushDescriptor& desc)
                     strokeBatch.patchCount,
                     strokeBatch.basePatch,
                     m_atlasStrokeProgram.baseInstanceUniformLocation(),
+                    m_atlasStrokeProgram.baseInstanceCache(),
                     &flushInjector);
             }
         }
@@ -2857,6 +2861,7 @@ void RenderContextGLImpl::flush(const FlushDescriptor& desc)
                     batch.elementCount,
                     batch.baseElement,
                     drawProgram->baseInstanceUniformLocation(),
+                    drawProgram->baseInstanceCache(),
                     &flushInjector);
                 break;
             }
@@ -3053,6 +3058,7 @@ void RenderContextGLImpl::drawIndexedInstancedNoInstancedAttribs(
     uint32_t instanceCount,
     uint32_t baseInstance,
     GLint baseInstanceUniformLocation,
+    uint32_t* baseInstanceCache,
     GLFlushInjector* flushInjector)
 {
     assert(m_capabilities.ANGLE_base_vertex_base_instance_shader_builtin ==
@@ -3078,7 +3084,12 @@ void RenderContextGLImpl::drawIndexedInstancedNoInstancedAttribs(
         else
 #endif
         {
-            glUniform1i(baseInstanceUniformLocation, chunkBaseInstance);
+            // The uniform keeps its value in the program between draws.
+            if (*baseInstanceCache != chunkBaseInstance)
+            {
+                glUniform1i(baseInstanceUniformLocation, chunkBaseInstance);
+                *baseInstanceCache = chunkBaseInstance;
+            }
             glDrawElementsInstanced(primitiveTopology,
                                     indexCount,
                                     GL_UNSIGNED_SHORT,

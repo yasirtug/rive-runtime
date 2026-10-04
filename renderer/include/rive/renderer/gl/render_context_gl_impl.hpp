@@ -330,7 +330,8 @@ private:
     //
     // If ANGLE_base_vertex_base_instance_shader_builtin is not supported,
     // the intended value of gl_BaseInstance is supplied via
-    // baseInstanceUniformLocation.
+    // baseInstanceUniformLocation. `baseInstanceCache` holds the value that
+    // uniform last received in its program, so repeats skip the call.
     void drawIndexedInstancedNoInstancedAttribs(
         GLenum primitiveTopology,
         uint32_t indexCount,
@@ -338,7 +339,11 @@ private:
         uint32_t instanceCount,
         uint32_t baseInstance,
         GLint baseInstanceUniformLocation,
+        uint32_t* baseInstanceCache,
         GLFlushInjector*);
+
+    // A base-instance uniform value no draw sets, marking the cache unknown.
+    static constexpr uint32_t kUnknownBaseInstance = UINT32_MAX;
 
     GLCapabilities m_capabilities;
 
@@ -378,10 +383,12 @@ private:
         {
             return m_baseInstanceUniformLocation;
         }
+        uint32_t* baseInstanceCache() const { return &m_baseInstanceCache; }
 
     private:
         glutils::Program m_program = glutils::Program::Zero();
         GLint m_baseInstanceUniformLocation = -1;
+        mutable uint32_t m_baseInstanceCache = kUnknownBaseInstance;
     };
 
     // Atlas rendering pipelines.
@@ -459,6 +466,7 @@ private:
         {
             return m_baseInstanceUniformLocation;
         }
+        uint32_t* baseInstanceCache() const { return &m_baseInstanceCache; }
 
         PipelineStatus status() const { return m_pipelineStatus; }
 
@@ -475,6 +483,7 @@ private:
         PipelineStatus m_pipelineStatus = PipelineStatus::notReady;
         GLuint m_id = 0;
         GLint m_baseInstanceUniformLocation = -1;
+        mutable uint32_t m_baseInstanceCache = kUnknownBaseInstance;
         const rcp<GLState> m_state;
 #ifdef WITH_RIVE_TOOLS
         SynthesizedFailureType m_synthesizedFailureType =
