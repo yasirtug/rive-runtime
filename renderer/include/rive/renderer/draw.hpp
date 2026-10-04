@@ -449,6 +449,10 @@ protected:
     void collectMidpointFanGeometry(RenderContext*);
     void resolveMidpointFanDensity();
 
+    // Analysis of an unchanged path kept on the path across frames, so a path
+    // drawn every frame is analysed once rather than every frame.
+    struct PersistedMidpointFan;
+
     MidpointFanGeometry* m_midpointFanGeometry = nullptr;
     // Zero selects exact-transform preparation (e.g., feathered paths).
     float m_preparationScale = 0;
@@ -482,6 +486,17 @@ protected:
     uint32_t* m_polarSegmentCounts = nullptr;
     uint32_t* m_parametricSegmentCounts = nullptr;
     uint64_t m_preparationMutationID = 0;
+
+    // Reads geometry analysed by another draw of the same path in this frame,
+    // or kept from an earlier one. The analysis arrays are shared and only
+    // read; the contours, which later steps fill in per draw, are copied.
+    void adoptMidpointFanGeometry(RenderContext*,
+                                  MidpointFanGeometry*,
+                                  const FixedQueue<uint8_t>& numChops,
+                                  const FixedQueue<Vec2D>& chopVertices,
+                                  std::array<Vec2D, 2>* tangentPairs,
+                                  const ContourInfo* contours);
+    void keepMidpointFanGeometry(uint32_t key) const;
 
     // Unique ID used by shaders for the current frame.
     uint32_t m_pathID = 0;

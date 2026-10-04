@@ -229,6 +229,43 @@ bool RiveRenderPath::isConvex() const
     return m_isConvex;
 }
 
+void RiveRenderPath::syncPreparations() const
+{
+    const uint64_t mutationID = getRawPathMutationID();
+    if (mutationID != m_preparationsMutationID)
+    {
+        m_preparations.clear();
+        m_preparationRequests = 0;
+        m_preparationsMutationID = mutationID;
+    }
+}
+
+const void* RiveRenderPath::findPreparation(uint32_t key) const
+{
+    syncPreparations();
+    for (const Preparation& preparation : m_preparations)
+    {
+        if (preparation.key == key)
+        {
+            return preparation.data.get();
+        }
+    }
+    return nullptr;
+}
+
+bool RiveRenderPath::shouldKeepPreparation() const
+{
+    syncPreparations();
+    return ++m_preparationRequests > 1;
+}
+
+void RiveRenderPath::keepPreparation(uint32_t key,
+                                     std::shared_ptr<const void> data) const
+{
+    syncPreparations();
+    m_preparations.push_back({key, std::move(data)});
+}
+
 uint64_t RiveRenderPath::getRawPathMutationID() const
 {
     static std::atomic<uint64_t> uniqueIDCounter = 0;

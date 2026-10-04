@@ -7,6 +7,9 @@
 #include "rive/math/raw_path.hpp"
 #include "rive/renderer.hpp"
 
+#include <memory>
+#include <vector>
+
 namespace rive
 {
 // RenderPath implementation for Rive's pixel local storage renderer.
@@ -50,6 +53,16 @@ public:
     bool isConvex() const;
     uint64_t getRawPathMutationID() const;
 
+    // Analysis a renderer derives from the raw path alone, kept while the path
+    // is unchanged so later frames need not repeat it. `key` names what was
+    // derived; the data is dropped as soon as the path changes.
+    const void* findPreparation(uint32_t key) const;
+    // Whether analysis just made is worth keeping: only once this unchanged
+    // path has been analysed before, so a path rebuilt every frame (e.g. an
+    // animation) never pays for copies it would use once.
+    bool shouldKeepPreparation() const;
+    void keepPreparation(uint32_t key, std::shared_ptr<const void> data) const;
+
     // 1-dimensional feathering along the normal vector quits looking like a
     // blur when there is strong curvature. This method returns a copy of the
     // path with shorter, flatter curves that will more accurately depict a
@@ -77,6 +90,17 @@ private:
     mutable float m_coarseArea;
     mutable uint64_t m_rawPathMutationID;
     mutable bool m_isConvex;
+
+    struct Preparation
+    {
+        uint32_t key;
+        std::shared_ptr<const void> data;
+    };
+    // Drops kept analysis if the path changed since it was made.
+    void syncPreparations() const;
+    mutable std::vector<Preparation> m_preparations;
+    mutable uint64_t m_preparationsMutationID = 0;
+    mutable uint32_t m_preparationRequests = 0;
 
     enum Dirt
     {

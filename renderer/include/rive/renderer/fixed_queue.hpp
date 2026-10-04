@@ -33,6 +33,17 @@ public:
     }
 
     size_t pushCount() const { return m_end - m_array; }
+    const T* data() const { return m_array; }
+
+    // Reads `count` elements that already exist elsewhere, e.g. analysis kept
+    // from an earlier frame. The queue only pops from them; it never writes.
+    void view(const T* array, size_t count)
+    {
+        m_array = const_cast<T*>(array);
+        m_front = m_array;
+        m_end = m_array + count;
+        RIVE_DEBUG_CODE(m_capacity = count;)
+    }
 
     T& push_back()
     {

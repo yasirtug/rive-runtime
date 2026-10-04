@@ -808,6 +808,103 @@ void PathDraw::releaseRefs()
     safe_unref(m_gradientRef);
 }
 
+struct PathDraw::PersistedMidpointFan
+{
+    // Its arrays point into the vectors below.
+    MidpointFanGeometry geometry;
+    std::vector<double> parametricPow4;
+    std::vector<float> rotationAngles;
+    std::vector<uint8_t> numChops;
+    std::vector<Vec2D> chopVertices;
+    std::vector<std::array<Vec2D, 2>> tangentPairs;
+    std::vector<ContourInfo> contours;
+};
+
+// Names kept midpoint-fan analysis on a path. Analysis of a path with a
+// non-zero preparation scale depends only on its raw path, whether it is
+// stroked, and whether the stroke joins round.
+static uint32_t persisted_midpoint_fan_key(bool stroke, bool roundJoins)
+{
+    constexpr uint32_t kMidpointFanKey = 0x4d460000; // 'MF'
+    return kMidpointFanKey | (stroke ? 1u : 0u) | (roundJoins ? 2u : 0u);
+}
+
+void PathDraw::adoptMidpointFanGeometry(RenderContext* context,
+                                        MidpointFanGeometry* geometry,
+                                        const FixedQueue<uint8_t>& numChops,
+                                        const FixedQueue<Vec2D>& chopVertices,
+                                        std::array<Vec2D, 2>* tangentPairs,
+                                        const ContourInfo* contours)
+{
+    m_midpointFanGeometry = geometry;
+    m_numChops = numChops;
+    m_chopVertices = chopVertices;
+    m_tangentPairs = tangentPairs;
+    m_contours = reinterpret_cast<ContourInfo*>(
+        context->perFrameAllocator().alloc(sizeof(ContourInfo) *
+                                           geometry->contourCount));
+    std::memcpy(m_contours,
+                contours,
+                sizeof(ContourInfo) * geometry->contourCount);
+    for (size_t i = 0; i < geometry->contourCount; ++i)
+    {
+        auto& contour = m_contours[i];
+        contour.strokeCapSegmentCount = 0;
+        contour.paddingVertexCount = 0;
+        contour.tessellationFlush = nullptr;
+        contour.tessellationLocation = 0;
+        contour.tessellationFlags = 0;
+        contour.preparationShared = false;
+    }
+    m_parametricSegmentCounts = context->parametricSegmentCountsAllocator()
+                                    .alloc(geometry->paddedCurveCount);
+    if (isStroke())
+    {
+        m_polarSegmentCounts = context->polarSegmentCountsAllocator().alloc(
+            geometry->paddedRotationCount);
+    }
+}
+
+void PathDraw::keepMidpointFanGeometry(uint32_t key) const
+{
+    const MidpointFanGeometry& geometry = *m_midpointFanGeometry;
+    auto kept = std::make_shared<PersistedMidpointFan>();
+    kept->geometry = geometry;
+    if (geometry.parametricPow4 != nullptr)
+    {
+        kept->parametricPow4.assign(geometry.parametricPow4,
+                                    geometry.parametricPow4 +
+                                        geometry.paddedCurveCount);
+        kept->geometry.parametricPow4 = kept->parametricPow4.data();
+    }
+    if (geometry.rotationAngles != nullptr)
+    {
+        kept->rotationAngles.assign(geometry.rotationAngles,
+                                    geometry.rotationAngles +
+                                        geometry.paddedRotationCount);
+        kept->geometry.rotationAngles = kept->rotationAngles.data();
+    }
+    if (m_numChops.data() != nullptr)
+    {
+        kept->numChops.assign(m_numChops.data(),
+                              m_numChops.data() + m_numChops.pushCount());
+    }
+    if (m_chopVertices.data() != nullptr)
+    {
+        kept->chopVertices.assign(m_chopVertices.data(),
+                                  m_chopVertices.data() +
+                                      m_chopVertices.pushCount());
+    }
+    if (m_tangentPairs != nullptr)
+    {
+        kept->tangentPairs.assign(m_tangentPairs,
+                                  m_tangentPairs +
+                                      geometry.paddedRotationCount);
+    }
+    kept->contours.assign(m_contours, m_contours + geometry.contourCount);
+    m_pathRef->keepPreparation(key, std::move(kept));
+}
+
 void PathDraw::initForMidpointFan(RenderContext* context,
                                   const RiveRenderPaint* paint)
 {
@@ -940,38 +1037,57 @@ void PathDraw::initForMidpointFan(RenderContext* context,
 
     if (geometrySource != nullptr)
     {
-        m_midpointFanGeometry = geometrySource->m_midpointFanGeometry;
-        const auto& geometry = *m_midpointFanGeometry;
-        m_numChops = geometrySource->m_numChops;
-        m_chopVertices = geometrySource->m_chopVertices;
-        m_tangentPairs = geometrySource->m_tangentPairs;
-        m_contours = reinterpret_cast<ContourInfo*>(
-            context->perFrameAllocator().alloc(sizeof(ContourInfo) *
-                                               geometry.contourCount));
-        std::memcpy(m_contours, geometrySource->m_contours,
-                    sizeof(ContourInfo) * geometry.contourCount);
-        for (size_t i = 0; i < geometry.contourCount; ++i)
-        {
-            auto& contour = m_contours[i];
-            contour.strokeCapSegmentCount = 0;
-            contour.paddingVertexCount = 0;
-            contour.tessellationFlush = nullptr;
-            contour.tessellationLocation = 0;
-            contour.tessellationFlags = 0;
-            contour.preparationShared = false;
-        }
-        m_parametricSegmentCounts = context->parametricSegmentCountsAllocator()
-                                        .alloc(geometry.paddedCurveCount);
-        if (isStroke())
-        {
-            m_polarSegmentCounts = context->polarSegmentCountsAllocator()
-                                       .alloc(geometry.paddedRotationCount);
-        }
+        adoptMidpointFanGeometry(context,
+                                 geometrySource->m_midpointFanGeometry,
+                                 geometrySource->m_numChops,
+                                 geometrySource->m_chopVertices,
+                                 geometrySource->m_tangentPairs,
+                                 geometrySource->m_contours);
     }
     else
     {
-        m_midpointFanGeometry = context->make<MidpointFanGeometry>();
-        collectMidpointFanGeometry(context);
+        // Feathered paths are prepared for their exact transform, so only
+        // scale-independent analysis is kept across frames.
+        const bool keepable = m_preparationScale != 0;
+        const uint32_t key =
+            keepable ? persisted_midpoint_fan_key(
+                           isStroke(),
+                           isStroke() && m_strokeJoin == StrokeJoin::round)
+                     : 0;
+        const auto* kept =
+            keepable ? static_cast<const PersistedMidpointFan*>(
+                           m_pathRef->findPreparation(key))
+                     : nullptr;
+        if (kept != nullptr)
+        {
+            FixedQueue<uint8_t> numChops;
+            numChops.view(kept->numChops.data(), kept->numChops.size());
+            FixedQueue<Vec2D> chopVertices;
+            chopVertices.view(kept->chopVertices.data(),
+                              kept->chopVertices.size());
+            adoptMidpointFanGeometry(
+                context,
+                const_cast<MidpointFanGeometry*>(&kept->geometry),
+                numChops,
+                chopVertices,
+                kept->tangentPairs.empty()
+                    ? nullptr
+                    : const_cast<std::array<Vec2D, 2>*>(
+                          kept->tangentPairs.data()),
+                kept->contours.data());
+        }
+        else
+        {
+            m_midpointFanGeometry = context->make<MidpointFanGeometry>();
+            collectMidpointFanGeometry(context);
+            // Cusp repair depends on the actual scale, so such analysis is
+            // never shared.
+            if (keepable && !m_midpointFanGeometry->hasCusps &&
+                m_pathRef->shouldKeepPreparation())
+            {
+                keepMidpointFanGeometry(key);
+            }
+        }
     }
     resolveMidpointFanDensity();
     cacheSet.draws[cacheSet.next] = this;
