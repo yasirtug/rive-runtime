@@ -624,7 +624,9 @@ PathDraw::PathDraw(IAABB pixelBounds,
     assert(!m_pathRef->getRawPath().empty());
     assert(paint != nullptr);
 
-    if (paint->getIsOpaque())
+    // A modulated opacity makes even an opaque paint translucent. Opaque draws skip blending and
+    // render front-to-back, so treating this one as opaque would overwrite what lies beneath it.
+    if (paint->getIsOpaque() && modulatedOpacity >= 1.0f)
     {
         m_drawContents |= gpu::DrawContents::opaquePaint;
     }
