@@ -43,6 +43,11 @@ public:
     float getCoarseArea() const;
     // Determine if the path's signed, post-transform area is positive.
     bool isClockwiseDominant(const Mat2D& viewMatrix) const;
+    // True for a single contour whose control polygon turns one way through
+    // exactly one revolution. Such a curve is convex, and convexity survives
+    // any affine transform, so a midpoint fan of it emitted in its dominant
+    // direction has no backward triangles.
+    bool isConvex() const;
     uint64_t getRawPathMutationID() const;
 
     // 1-dimensional feathering along the normal vector quits looking like a
@@ -71,15 +76,16 @@ private:
     mutable AABB m_bounds;
     mutable float m_coarseArea;
     mutable uint64_t m_rawPathMutationID;
+    mutable bool m_isConvex;
 
     enum Dirt
     {
         kPathBoundsDirt = 1 << 0,
         kRawPathMutationIDDirt = 1 << 1,
         kPathCoarseAreaDirt = 1 << 2,
+        kPathConvexityDirt = 1 << 3,
         kAllDirt = ~0,
     };
-
     mutable uint32_t m_dirt = kAllDirt;
     RIVE_DEBUG_CODE(mutable int m_rawPathMutationLockCount = 0;)
 };

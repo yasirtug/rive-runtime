@@ -411,6 +411,10 @@ protected:
     float m_featherRadius = 0;
     gpu::ContourDirections m_contourDirections;
     uint32_t m_contourFlags = 0;
+    // MSAA only: the fill's midpoint fan has no backward triangles, so the
+    // borrowed-coverage and stencil-reset passes would rasterize nothing. The
+    // fan pass alone draws it.
+    bool m_msaaFansOnly = false;
 
     // Only used when rendering coverage via the atlas.
     gpu::AtlasTransform m_atlasTransform;

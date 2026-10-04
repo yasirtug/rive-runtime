@@ -1814,6 +1814,19 @@ void PathDraw::countSubpasses()
             {
                 // MSAA "fast" path: (effectively) single pass rendering.
                 m_subpassCount = 3;
+                // Emitted in its dominant direction, a convex contour's fan is
+                // all forward triangles. With no clip in play the stencil is
+                // clean, so the fan pass alone draws exactly what all three
+                // passes would.
+                const bool usesClipping =
+                    enums::any_flag_set(m_drawContents,
+                                        gpu::DrawContents::activeClip |
+                                            gpu::DrawContents::clipUpdate);
+                if (!usesClipping && m_pathRef->isConvex())
+                {
+                    m_msaaFansOnly = true;
+                    m_subpassCount = 1;
+                }
             }
             if (isOpaque())
             {
@@ -2029,8 +2042,9 @@ gpu::DrawBatch* PathDraw::pushToRenderContext(
             assert(passCount <= 3);
             assert(passIdx < passCount);
             gpu::DrawType msaaDrawType =
-                isStroke() ? gpu::DrawType::msaaStrokes
-                           : MSAA_FILL_TYPES[passCount - 1][passIdx];
+                isStroke()       ? gpu::DrawType::msaaStrokes
+                : m_msaaFansOnly ? gpu::DrawType::msaaMidpointFans
+                                 : MSAA_FILL_TYPES[passCount - 1][passIdx];
             return &flush->pushMidpointFanDraw(this,
                                                msaaDrawType,
                                                tessVertexCount,

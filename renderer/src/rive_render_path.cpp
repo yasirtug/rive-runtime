@@ -12,6 +12,81 @@
 
 namespace rive
 {
+// Walks the control polygon of a single closed contour. Every turn must go the
+// same way, and the turns must add up to one revolution, which rules out
+// star polygons that keep turning one way through several revolutions. Nearly
+// collinear corners count as straight; a corner that doubles back does not.
+static bool control_polygon_is_convex(const RawPath& rawPath)
+{
+    if (rawPath.countMoveTos() != 1)
+    {
+        return false;
+    }
+    Span<const Vec2D> pts = rawPath.points();
+    const size_t n = pts.size();
+    if (n < 3)
+    {
+        return false;
+    }
+    constexpr float kCollinearTolerance = 1e-5f;
+    float turnSign = 0;
+    float totalTurn = 0;
+    Vec2D firstEdge = {0, 0};
+    Vec2D prevEdge = {0, 0};
+    bool haveEdge = false;
+    auto turnTo = [&](Vec2D edge) {
+        if (edge.x == 0 && edge.y == 0)
+        {
+            return true; // Repeated point.
+        }
+        if (!haveEdge)
+        {
+            firstEdge = prevEdge = edge;
+            haveEdge = true;
+            return true;
+        }
+        const float cross = Vec2D::cross(prevEdge, edge);
+        const float dot = Vec2D::dot(prevEdge, edge);
+        if (fabsf(cross) <=
+            kCollinearTolerance * prevEdge.length() * edge.length())
+        {
+            if (dot < 0)
+            {
+                return false; // Doubles back on itself.
+            }
+        }
+        else
+        {
+            const float sign = cross > 0 ? 1.f : -1.f;
+            if (turnSign == 0)
+            {
+                turnSign = sign;
+            }
+            else if (sign != turnSign)
+            {
+                return false;
+            }
+        }
+        totalTurn += atan2f(cross, dot);
+        prevEdge = edge;
+        return true;
+    };
+    for (size_t i = 1; i < n; ++i)
+    {
+        if (!turnTo(pts[i] - pts[i - 1]))
+        {
+            return false;
+        }
+    }
+    // Fills close implicitly: the closing edge, then the turn back into the
+    // first edge.
+    if (!turnTo(pts[0] - pts[n - 1]) || !haveEdge || !turnTo(firstEdge))
+    {
+        return false;
+    }
+    return fabsf(fabsf(totalTurn) - 2 * math::PI) < 1e-2f;
+}
+
 RiveRenderPath::RiveRenderPath(FillRule fillRule, RawPath& rawPath)
 {
     m_fillRule = fillRule;
@@ -142,6 +217,16 @@ bool RiveRenderPath::isClockwiseDominant(const Mat2D& viewMatrix) const
     float matrixDeterminant =
         viewMatrix[0] * viewMatrix[3] - viewMatrix[2] * viewMatrix[1];
     return getCoarseArea() * matrixDeterminant >= 0;
+}
+
+bool RiveRenderPath::isConvex() const
+{
+    if (m_dirt & kPathConvexityDirt)
+    {
+        m_isConvex = control_polygon_is_convex(m_rawPath);
+        m_dirt &= ~kPathConvexityDirt;
+    }
+    return m_isConvex;
 }
 
 uint64_t RiveRenderPath::getRawPathMutationID() const
