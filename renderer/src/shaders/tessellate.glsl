@@ -121,10 +121,10 @@ VERTEX_MAIN(@tessellateVertexMain, Attrs, attrs, _vertexID, _instanceID)
 
     if (@a_args.w == TESSELLATION_ALIAS_CONTOUR_FLAG)
     {
-        v_p0p1 = float4(.0);
-        v_p2p3 = float4(.0);
+        v_p0p1 = float4(.0, .0, .0, .0);
+        v_p2p3 = float4(.0, .0, .0, .0);
         v_args = float4(coord.x + p0.x, p0.y, .0, .0);
-        v_joinArgs = float3(.0);
+        v_joinArgs = float3(.0, .0, .0);
         v_contourIDWithFlags = TESSELLATION_ALIAS_CONTOUR_FLAG;
     }
     else
